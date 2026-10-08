@@ -1,0 +1,241 @@
+---
+title: "Multiple imputation versus debiased machine learning for a missing covariate"
+author: "Dominic Obeng Koranteng"
+date: "`r format(Sys.Date(), '%d %B %Y')`"
+output:
+  github_document:
+    html_preview: false
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE,
+                      fig.path = "figures/", dpi = 200, fig.retina = 1)
+library(ggplot2)
+source("R/dgm.R")
+source("R/performance.R")
+
+sim <- readRDS("results/sim_results.rds")
+perf <- summarise_performance(sim$results)
+n_sim <- sim$settings$n_sim
+
+method_labels <- c(full = "Full data (benchmark)", cc = "Complete cases",
+                   mean_imp = "Mean imputation", mice = "MICE (pmm)",
+                   smcfcs = "smcfcs", dml = "Debiased ML (AIPW)")
+term_labels <- c("x" = "beta[1]~(x)", "x:z" = "beta[3]~(x %*% z)")
+perf <- subset(perf, term %in% names(term_labels))
+perf$method_f <- factor(method_labels[perf$method], levels = rev(method_labels))
+perf$term_f <- factor(term_labels[perf$term], levels = term_labels)
+perf$mech_f <- factor(perf$mechanism, levels = c("MCAR", "MAR", "MNAR"))
+perf$rate_f <- factor(sprintf("%.0f%% missing", 100 * perf$rate))
+
+# Look up one performance number, e.g. pv("MAR", 0.2, "cc", "x", "bias")
+pv <- function(mech, rate, method, term, what) {
+  perf[perf$mechanism == mech & perf$rate == rate & perf$method == method &
+         perf$term == term, what]
+}
+f2 <- function(x) formatC(x, format = "f", digits = 2)
+f3 <- function(x) formatC(x, format = "f", digits = 3)
+pct <- function(x) paste0(formatC(100 * x, format = "f", digits = 1), "%")
+
+# Shared look for the figures
+ink <- "#0b0b0b"; ink2 <- "#52514e"; grid_col <- "#e6e5e0"
+rate_cols <- c("20% missing" = "#2a78d6", "40% missing" = "#eb6834")
+theme_study <- theme_minimal(base_size = 11) +
+  theme(text = element_text(colour = ink), axis.text = element_text(colour = ink2),
+        strip.text = element_text(colour = ink, face = "bold"),
+        panel.grid.major.y = element_blank(), panel.grid.minor = element_blank(),
+        panel.grid.major.x = element_line(colour = grid_col, linewidth = 0.3),
+        legend.position = "top", legend.title = element_blank(),
+        panel.spacing.x = unit(1.6, "lines"), panel.spacing.y = unit(1, "lines"),
+        plot.background = element_rect(fill = "white", colour = NA))
+```
+
+## Aim
+
+When a covariate is missing and the analysis model contains an interaction,
+standard multiple imputation can bias the estimates. Two remedies exist:
+imputation that respects the analysis model (smcfcs), and a doubly robust
+estimator with machine-learned nuisance functions (debiased machine learning,
+DML). This study compares both with complete-case analysis, mean imputation
+and default MICE under MCAR, MAR and MNAR mechanisms. The design follows the
+ADEMP structure of Morris, White and Crowther (2019).
+
+## Design
+
+**Data-generating mechanism.** Each dataset has *n* = `r sim$settings$n` units.
+
+- $Z \sim N(0, 1)$ and $X = 0.5Z + \sqrt{0.75}\,E$ with $E \sim N(0, 1)$, so $X \sim N(0, 1)$ and $\mathrm{corr}(X, Z) = 0.5$.
+- $Y = \beta_0 + \beta_1 X + \beta_2 Z + \beta_3 XZ + U$, with $U \sim N(0, 1)$ and $(\beta_0, \beta_1, \beta_2, \beta_3) = (0, 1, 1, 0.5)$.
+
+$X$ is incomplete; $Y$ and $Z$ are always observed. The probability that $X$
+is missing is
+
+| Mechanism | $P(X \text{ missing})$ | Depends on |
+|---|---|---|
+| MCAR | constant | nothing |
+| MAR  | $0.05 + 0.75\,\mathrm{expit}(a_0 + Y + 0.5Z)$ | the outcome and $Z$ |
+| MNAR | $0.05 + 0.75\,\mathrm{expit}(a_0 + 1.5X + 0.5Z)$ | $X$ itself and $Z$ |
+
+Root-finding sets the intercept $a_0$ so that `r 100 * sim$settings$rates[1]`%
+or `r 100 * sim$settings$rates[2]`% of $X$ is missing on average. The floor and
+ceiling keep every unit's chance of being observed at 20% or more, so the
+positivity condition that weighting needs holds by design.
+
+**Estimands.** $\beta_1$, the coefficient of $X$, and $\beta_3$, the
+$X \times Z$ interaction, in the linear model `y ~ x + z + x:z`.
+
+**Methods.**
+
+| Method | What it does |
+|---|---|
+| Full data | Fits the model before any values are deleted. A benchmark only. |
+| Complete cases | Drops units with missing $X$. |
+| Mean imputation | Replaces missing $X$ with the observed mean. |
+| MICE (pmm) | `mice` default: predictive mean matching of $X$ on $Y$ and $Z$, then the interaction is formed from the imputed $X$. The imputation model omits the interaction, so it is incompatible with the analysis model. `r sim$settings$m` imputations, Rubin's rules. |
+| smcfcs | Substantive-model-compatible imputation (Bartlett et al. 2015) with the analysis model supplied. `r sim$settings$m` imputations, Rubin's rules. |
+| Debiased ML (AIPW) | Augmented inverse-probability-weighted estimating equation for regression with a missing covariate (Robins, Rotnitzky and Zhao 1994), in one-step form. A probability forest estimates $P(R = 1 \mid Y, Z)$, bounded below at 0.05. A two-learner super learner (random forest plus quadratic regression, weights chosen by out-of-sample error) estimates $E[X \mid Y, Z]$ and $\mathrm{Var}(X \mid Y, Z)$. 5-fold cross-fitting; sandwich standard errors. |
+
+**How the DML settings were chosen.** I fixed the learners in development runs
+that used different seeds from this study. Forests alone gave a stable but
+upward-biased estimator, and adding the quadratic regression reduced the bias.
+Two 200-replicate pilots on the main-study seeds then showed that the AIPW
+equation can fail. When an observed unit with an extreme $X$ gets
+a large weight, the equation's matrix comes close to singular. With response
+probabilities bounded at 0.01, about 7% of datasets at 40% MAR gave inflated
+standard errors. Raising the bound to 0.05 (weights at most 20) cut that to 4%,
+but one estimate still missed by more than 40. I then switched to the one-step
+form, which starts from a plug-in estimate and adds one AIPW correction step. The one-step form
+never inverts that matrix and has the same large-sample behaviour. The results
+below come from the revised estimator on those same pilot seeds, so treat the
+DML rows as provisional. Replicates 201 to 1000 of the full run give an
+untouched check.
+
+I tried a quadratic outcome model (`y ~ x + I(x^2) + z`) first and dropped it:
+its estimating equation needs $E[X^4 \mid Y, Z]$, and none of the learners I
+tried gave stable estimates at this sample size.
+
+MICE, smcfcs and DML all assume that $X$ is missing at random given $Y$ and
+$Z$. Complete-case analysis assumes instead that missingness does not depend on
+$Y$ once $X$ and $Z$ are known. Under the MNAR mechanism here that assumption
+holds, so complete-case analysis should stay unbiased while the other three
+should not.
+
+**Performance measures.** Bias, empirical and model-based standard errors,
+root mean squared error and the coverage of nominal 95% confidence intervals,
+each with its Monte Carlo standard error (MCSE). Each scenario has
+`r n_sim` replicates.
+
+## Results
+
+```{r bias, fig.width = 9, fig.height = 5.2, fig.cap = ""}
+plot_dat <- subset(perf, method != "mean_imp")
+ggplot(plot_dat, aes(x = bias, y = method_f, colour = rate_f)) +
+  geom_vline(xintercept = 0, colour = ink2, linewidth = 0.4) +
+  geom_errorbarh(aes(xmin = bias - 1.96 * bias_mcse, xmax = bias + 1.96 * bias_mcse),
+                 height = 0, linewidth = 0.6, position = position_dodge(width = 0.6)) +
+  geom_point(size = 2.4, position = position_dodge(width = 0.6)) +
+  facet_grid(term_f ~ mech_f, labeller = labeller(term_f = label_parsed)) +
+  scale_colour_manual(values = rate_cols) +
+  labs(x = "Bias (estimate minus truth), with 95% Monte Carlo interval", y = NULL) +
+  theme_study
+```
+
+*Figure 1. Bias of each method. Mean imputation is left out because its bias
+is far off this scale (between `r f2(min(subset(perf, method == "mean_imp")$bias))`
+and `r f2(max(subset(perf, method == "mean_imp")$bias))`); Tables 1 and 2 list it.*
+
+```{r coverage, fig.width = 9, fig.height = 5.2, fig.cap = ""}
+mc_band <- 1.96 * sqrt(0.95 * 0.05 / n_sim)
+ggplot(plot_dat, aes(x = 100 * coverage, y = method_f, colour = rate_f)) +
+  annotate("rect", xmin = 100 * (0.95 - mc_band), xmax = 100 * (0.95 + mc_band),
+           ymin = -Inf, ymax = Inf, fill = grid_col, alpha = 0.8) +
+  geom_vline(xintercept = 95, colour = ink2, linewidth = 0.4) +
+  geom_point(size = 2.4, position = position_dodge(width = 0.6)) +
+  facet_grid(term_f ~ mech_f, labeller = labeller(term_f = label_parsed)) +
+  scale_colour_manual(values = rate_cols) +
+  scale_x_continuous(limits = c(floor(min(100 * plot_dat$coverage) / 10) * 10, 100),
+                     breaks = seq(0, 100, 10)) +
+  labs(x = "Coverage of 95% confidence intervals (%)", y = NULL) +
+  theme_study
+```
+
+*Figure 2. Coverage of nominal 95% intervals. The grey band shows the range
+expected from Monte Carlo error alone if true coverage were 95%.*
+
+```{r tables, results = "asis"}
+cell <- function(est, mcse, digits = 3) {
+  sprintf(paste0("%.", digits, "f (%.", digits, "f)"), est, mcse)
+}
+scen_order <- c("MCAR_20", "MAR_20", "MNAR_20", "MCAR_40", "MAR_40", "MNAR_40")
+make_table <- function(term, what, mcse, digits, scale = 1) {
+  d <- perf[perf$term == term, ]
+  tab <- sapply(scen_order, function(s) {
+    dd <- d[d$scenario == s, ]
+    dd <- dd[match(names(method_labels), dd$method), ]
+    cell(scale * dd[[what]], scale * dd[[mcse]], digits)
+  })
+  tab <- cbind(Method = method_labels, tab)
+  colnames(tab) <- c("Method", "MCAR 20%", "MAR 20%", "MNAR 20%", "MCAR 40%", "MAR 40%", "MNAR 40%")
+  tab
+}
+cat("**Table 1. Bias (MCSE).**\n\n*Coefficient of x*\n")
+print(knitr::kable(make_table("x", "bias", "bias_mcse", 3), row.names = FALSE))
+cat("\n*Interaction x:z*\n")
+print(knitr::kable(make_table("x:z", "bias", "bias_mcse", 3), row.names = FALSE))
+cat("\n**Table 2. Coverage of 95% intervals, % (MCSE).**\n\n*Coefficient of x*\n")
+print(knitr::kable(make_table("x", "coverage", "coverage_mcse", 1, 100), row.names = FALSE))
+cat("\n*Interaction x:z*\n")
+print(knitr::kable(make_table("x:z", "coverage", "coverage_mcse", 1, 100), row.names = FALSE))
+cat("\n**Table 3. Empirical SE / model-based SE / RMSE for the interaction x:z.**\n\n")
+d <- perf[perf$term == "x:z", ]
+tab3 <- sapply(scen_order, function(s) {
+  dd <- d[d$scenario == s, ]
+  dd <- dd[match(names(method_labels), dd$method), ]
+  sprintf("%.3f / %.3f / %.3f", dd$emp_se, dd$mod_se, dd$rmse)
+})
+tab3 <- cbind(Method = method_labels, tab3)
+colnames(tab3) <- c("Method", "MCAR 20%", "MAR 20%", "MNAR 20%", "MCAR 40%", "MAR 40%", "MNAR 40%")
+print(knitr::kable(tab3, row.names = FALSE))
+```
+
+```{r timing}
+secs <- aggregate(seconds ~ method, data = unique(sim$results[, c("scenario", "rep", "method", "seconds")]), FUN = median)
+secs$method <- method_labels[secs$method]
+secs <- secs[match(method_labels, secs$method), ]
+```
+
+Median computing time per dataset: MICE `r f2(secs$seconds[secs$method == "MICE (pmm)"])` s,
+smcfcs `r f2(secs$seconds[secs$method == "smcfcs"])` s,
+debiased ML `r f2(secs$seconds[secs$method == "Debiased ML (AIPW)"])` s.
+
+## Findings
+
+```{r findings, child = "findings.Rmd"}
+```
+
+## Reproducibility
+
+Run `Rscript run_simulation.R` from the project folder, then knit this file.
+Replicate *r* in every scenario generates its data from seed
+`r sim$settings$base_seed` + *r* (Mersenne-Twister), and method *j* then runs
+from seed `r sim$settings$base_seed` + *j* × 10^6 + *r*. You can regenerate
+any single dataset or rerun any single method, and the results do not depend
+on the number of parallel workers.
+
+<details>
+<summary>Session information for this run</summary>
+
+```{r session}
+sim$session
+```
+
+</details>
+
+## References
+
+- Bartlett JW, Seaman SR, White IR, Carpenter JR (2015). Multiple imputation of covariates by fully conditional specification: accommodating the substantive model. *Statistical Methods in Medical Research* 24(4):462-487.
+- Chernozhukov V, Chetverikov D, Demirer M, Duflo E, Hansen C, Newey W, Robins J (2018). Double/debiased machine learning for treatment and structural parameters. *The Econometrics Journal* 21(1):C1-C68.
+- Morris TP, White IR, Crowther MJ (2019). Using simulation studies to evaluate statistical methods. *Statistics in Medicine* 38(11):2074-2102.
+- Robins JM, Rotnitzky A, Zhao LP (1994). Estimation of regression coefficients when some regressors are not always observed. *Journal of the American Statistical Association* 89(427):846-866.
+- Seaman SR, Bartlett JW, White IR (2012). Multiple imputation of missing covariates with non-linear effects and interactions: an evaluation of statistical methods. *BMC Medical Research Methodology* 12:46.
+- van Buuren S, Groothuis-Oudshoorn K (2011). mice: Multivariate imputation by chained equations in R. *Journal of Statistical Software* 45(3):1-67.

@@ -1,0 +1,62 @@
+```{r findings-setup, include = FALSE}
+rng <- function(method, term, what, mechs = c("MCAR", "MAR", "MNAR")) {
+  v <- perf[perf$method == method & perf$term == term & perf$mechanism %in% mechs, what]
+  c(min(v), max(v))
+}
+mice_xz  <- rng("mice", "x:z", "bias")
+mice_cov <- rng("mice", "x:z", "coverage")
+sm_bias  <- rng("smcfcs", "x:z", "bias", c("MCAR", "MAR"))
+sm_cov   <- rng("smcfcs", "x:z", "coverage", c("MCAR", "MAR"))
+dml_bias <- rng("dml", "x:z", "bias", c("MCAR", "MAR"))
+dml_cov  <- rng("dml", "x:z", "coverage", c("MCAR", "MAR"))
+se_ratio <- function(rate) pv("MAR", rate, "dml", "x:z", "emp_se") / pv("MAR", rate, "smcfcs", "x:z", "emp_se")
+n_unstable <- sum(sim$results$method == "dml" & sim$results$term == "x:z" & sim$results$se > 0.2)
+```
+
+**1. Default MICE underestimates the interaction under every mechanism,
+including MCAR.** Its bias for $\beta_3$ runs from `r f3(mice_xz[1])` to
+`r f3(mice_xz[2])`, and interval coverage falls as low as
+`r pct(mice_cov[1])`. The cause is the imputation model, which omits the
+$X \times Z$ term. Imputed values carry no interaction, so the pooled estimate
+shrinks toward zero, and more missing data means more shrinkage.
+
+**2. smcfcs gives near-unbiased estimates and nominal coverage under MCAR and
+MAR.** For $\beta_3$ its bias stays between `r f3(sm_bias[1])` and
+`r f3(sm_bias[2])`, with coverage from `r pct(sm_cov[1])` to `r pct(sm_cov[2])`.
+Under MAR it also has the smallest empirical standard error for $\beta_3$ of
+any method. This design suits smcfcs: its normal model for $X$ given $Z$ is
+correct.
+
+**3. Complete-case analysis is biased under MAR but unbiased under this MNAR
+mechanism.** Under MAR with 20% missing, its coverage for $\beta_1$ is
+`r pct(pv("MAR", 0.2, "cc", "x", "coverage"))`. Under MNAR its bias for
+$\beta_1$ is `r f3(pv("MNAR", 0.2, "cc", "x", "bias"))` (20%) and
+`r f3(pv("MNAR", 0.4, "cc", "x", "bias"))` (40%). Here missingness depends on
+$X$ and $Z$ but not on $Y$ given them, so the complete cases still follow the
+outcome model. The methods that assume MAR given $(Y, Z)$ pick up small
+biases instead: smcfcs `r f3(pv("MNAR", 0.2, "smcfcs", "x", "bias"))` and DML
+`r f3(pv("MNAR", 0.2, "dml", "x", "bias"))` for $\beta_1$ at 20%. Before you
+drop complete-case analysis because data look MNAR, ask whether missingness
+depends on the outcome once the covariates are known.
+
+**4. Debiased ML removes most of the MAR bias without a model for $X$, at a
+cost in precision and stability.** Under MCAR and MAR its bias for $\beta_3$ lies
+between `r f3(dml_bias[1])` and `r f3(dml_bias[2])`, with coverage from
+`r pct(dml_cov[1])` to `r pct(dml_cov[2])`. Under MAR its empirical standard
+error for $\beta_3$ is `r f2(se_ratio(0.2))` times that of smcfcs at 20%
+missing and `r f2(se_ratio(0.4))` times at 40%. The estimator also needed two
+safeguards before it behaved at *n* = `r sim$settings$n` (see Methods), and
+`r n_unstable` of `r 6 * n_sim` estimates of $\beta_3$ still had standard
+errors above 0.2.
+
+**5. Mean imputation is biased under all three mechanisms.** Its coverage
+for $\beta_1$ under MAR is `r pct(pv("MAR", 0.2, "mean_imp", "x", "coverage"))`
+at 20% missing.
+
+**Limitations and next steps.** Each scenario has `r n_sim` replicates, so
+coverage carries a Monte Carlo SE of about
+`r pct(sqrt(0.95 * 0.05 / n_sim))`; the full run uses 1000. The study fixes
+*n* at `r sim$settings$n` and keeps the covariate model for smcfcs correct. Two
+extensions would test where DML earns its keep: a skewed or nonlinear
+distribution for $X$ given $Z$, which breaks the smcfcs covariate model but not
+DML, and larger samples, where DML's finite-sample bias should shrink.

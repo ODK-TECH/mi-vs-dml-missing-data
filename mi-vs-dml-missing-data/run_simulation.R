@@ -1,0 +1,113 @@
+# Multiple imputation versus debiased machine learning: simulation runner -----
+#
+# Run from the project folder:
+#   Rscript run_simulation.R               full study (settings below)
+#   Rscript run_simulation.R --quick       5 replicates per scenario, to test the code
+#   Rscript run_simulation.R --n_sim=200   change the number of replicates
+#   Rscript run_simulation.R --workers=4   change the number of parallel workers
+#
+# Each scenario saves to results/raw/<scenario>.rds as soon as it finishes, and
+# a rerun skips scenarios that already have a file. Delete a file to redo it.
+
+source("R/dgm.R")
+source("R/methods.R")
+source("R/performance.R")
+
+settings <- list(
+  n          = 1000,                      # sample size per dataset
+  n_sim      = 1000,                      # replicates per scenario
+  mechanisms = c("MCAR", "MAR", "MNAR"),
+  rates      = c(0.2, 0.4),               # target proportion of x missing
+  m          = 10,                        # imputations for MICE and smcfcs
+  base_seed  = 20261008,
+  workers    = max(1, parallel::detectCores() - 1)
+)
+
+args <- commandArgs(trailingOnly = TRUE)
+arg_value <- function(name) {
+  hit <- grep(paste0("^--", name, "="), args, value = TRUE)
+  if (length(hit)) as.integer(sub(".*=", "", hit[1])) else NULL
+}
+if (!is.null(arg_value("n_sim")))   settings$n_sim   <- arg_value("n_sim")
+if (!is.null(arg_value("workers"))) settings$workers <- arg_value("workers")
+quick <- "--quick" %in% args
+if (quick) settings$n_sim <- 5
+out_dir <- if (quick) "results/quick" else "results"
+dir.create(file.path(out_dir, "raw"), recursive = TRUE, showWarnings = FALSE)
+
+scenarios <- expand.grid(mechanism = settings$mechanisms, rate = settings$rates,
+                         stringsAsFactors = FALSE)
+scenarios$scenario <- sprintf("%s_%02d", scenarios$mechanism, round(100 * scenarios$rate))
+scenarios$a0 <- mapply(calibrate_intercept, scenarios$mechanism, scenarios$rate,
+                       MoreArgs = list(seed = settings$base_seed))
+
+# One replicate: simulate, delete, analyse six ways.
+# Seeds depend only on the replicate number r:
+#   data       base_seed + r
+#   method j   base_seed + j * 1e6 + r   (j = 1, ..., 6, in the order listed)
+# So replicate r of every scenario starts from the same full data (common
+# random numbers), each method has its own random-number stream, and results
+# do not depend on the number of workers.
+set_rng <- function(seed) {
+  set.seed(seed, kind = "Mersenne-Twister", normal.kind = "Inversion",
+           sample.kind = "Rejection")
+}
+
+run_one <- function(rep, sc, settings) {
+  set_rng(settings$base_seed + rep)
+  full <- simulate_full_data(settings$n)
+  dat  <- impose_missingness(full, sc$mechanism, sc$a0, sc$rate)
+
+  methods <- list(
+    full     = function(d) fit_full(full),
+    cc       = fit_cc,
+    mean_imp = fit_mean_imp,
+    mice     = function(d) fit_mice(d, m = settings$m),
+    smcfcs   = function(d) fit_smcfcs(d, m = settings$m),
+    dml      = fit_dml
+  )
+
+  rows <- lapply(seq_along(methods), function(j) {
+    nm <- names(methods)[j]
+    set_rng(settings$base_seed + j * 1e6 + rep)
+    start <- proc.time()[["elapsed"]]
+    res <- tryCatch(
+      methods[[nm]](dat),
+      error = function(e) data.frame(term = names(true_beta), est = NA_real_,
+                                     se = NA_real_, df = NA_real_)
+    )
+    res$method  <- nm
+    res$seconds <- proc.time()[["elapsed"]] - start
+    res
+  })
+  cbind(scenario = sc$scenario, mechanism = sc$mechanism, rate = sc$rate,
+        rep = rep, prop_missing = mean(is.na(dat$x)), do.call(rbind, rows))
+}
+
+future::plan(future::multisession, workers = settings$workers)
+cat(sprintf("Running %d scenarios x %d replicates on %d workers\n",
+            nrow(scenarios), settings$n_sim, settings$workers))
+
+for (i in seq_len(nrow(scenarios))) {
+  sc <- scenarios[i, ]
+  file <- file.path(out_dir, "raw", paste0(sc$scenario, ".rds"))
+  if (file.exists(file)) {
+    cat("Skipping", sc$scenario, "(already saved)\n")
+    next
+  }
+  start <- Sys.time()
+  res <- future.apply::future_lapply(seq_len(settings$n_sim), run_one, sc = sc,
+                                     settings = settings, future.seed = TRUE)
+  saveRDS(do.call(rbind, res), file)
+  cat(sprintf("%-8s done in %.1f min\n", sc$scenario,
+              as.numeric(difftime(Sys.time(), start, units = "mins"))))
+}
+future::plan(future::sequential)
+
+# Combine, summarise, save -------------------------------------------------------
+results <- do.call(rbind, lapply(file.path(out_dir, "raw", paste0(scenarios$scenario, ".rds")), readRDS))
+perf <- summarise_performance(results)
+saveRDS(list(results = results, settings = settings, scenarios = scenarios,
+             session = sessionInfo()), file.path(out_dir, "sim_results.rds"))
+write.csv(perf, file.path(out_dir, "performance.csv"), row.names = FALSE)
+cat("Saved", file.path(out_dir, "sim_results.rds"), "and performance.csv\n")

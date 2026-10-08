@@ -1,0 +1,13 @@
+# R and RStudio
+.Rproj.user/
+.Rhistory
+.RData
+.Ruserdata
+
+# Per-scenario files are combined into results/sim_results.rds
+results/raw/
+results/quick/
+
+# Knitting by-products
+*.html
+report_cache/
