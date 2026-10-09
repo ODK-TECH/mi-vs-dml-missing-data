@@ -1,5 +1,4 @@
-# Analysis methods ------------------------------------------------------------
-#
+# Analysis methods 
 # Each method takes a data frame (y, x, z) with missing values in x and returns
 # one row per coefficient: term, est, se, df. The runner builds 95% confidence
 # intervals as est +/- qt(0.975, df) * se. df = Inf gives a normal interval.
