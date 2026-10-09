@@ -49,9 +49,9 @@ each unit's predictions out of sample, and sandwich standard errors give the
 intervals. The code in [R/methods.R](R/methods.R) states the estimating
 equation in full.
 
-## Run it
+## Analysis
 
-You need R 4.1 or later and these packages:
+The analysis done using R 4.6.0 and these packages:
 
 ```r
 install.packages(c("mice", "smcfcs", "ranger", "future.apply", "ggplot2", "rmarkdown"))
