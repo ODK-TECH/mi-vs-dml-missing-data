@@ -1,4 +1,4 @@
-# Performance measures ----------------------------------------------------------
+# Performance measures 
 #
 # Formulas and Monte Carlo standard errors (MCSE) follow Morris, White and
 # Crowther (2019), "Using simulation studies to evaluate statistical methods",
