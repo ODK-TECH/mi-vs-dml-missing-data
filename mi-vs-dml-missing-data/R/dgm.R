@@ -1,4 +1,4 @@
-# Data-generating mechanism ---------------------------------------------------
+# Data-generating mechanism 
 #
 # Full data (no missing values):
 #   Z ~ N(0, 1)
