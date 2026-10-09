@@ -1,9 +1,9 @@
 # Multiple imputation versus debiased machine learning for a missing covariate
 
-A simulation study in R. You have a linear model with an interaction,
+A simulation study in R. Suppose we have a linear model with an interaction,
 `y ~ x + z + x:z`, and some values of `x` are missing. Which method gives you
 an unbiased estimate and an honest confidence interval, and how does the
-answer change with the missing-data mechanism?
+answer change with the missingdata mechanism?
 
 The study compares six approaches across MCAR, MAR and MNAR mechanisms at 20%
 and 40% missingness, following the ADEMP framework of Morris, White and
